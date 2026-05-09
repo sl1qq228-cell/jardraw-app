@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>JarDraw — Авторозіграші Monobank</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* ── Base ───────────────────────────── */
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+
+    body {
+      background-color: var(--tg-theme-bg-color, #1c1c1e);
+      color: var(--tg-theme-text-color, #ffffff);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+      overscroll-behavior: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .card { background-color: var(--tg-theme-secondary-bg-color, #2c2c2e); border-radius: 16px; }
+
+    .btn-primary {
+      background-color: var(--tg-theme-button-color, #007aff);
+      color: var(--tg-theme-button-text-color, #ffffff);
+      border-radius: 14px; font-weight: 600;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn-primary:active { opacity: 0.7; transform: scale(0.98); }
+    .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+    input, textarea {
+      background-color: var(--tg-theme-secondary-bg-color, #2c2c2e);
+      color: var(--tg-theme-text-color, #fff);
+      border: 1.5px solid transparent;
+      border-radius: 12px; padding: 14px 16px;
+      width: 100%; font-size: 15px; outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--tg-theme-button-color, #007aff);
+    }
+    input::placeholder, textarea::placeholder { opacity: 0.38; }
+
+    /* ── Animations ─────────────────────── */
+    @keyframes slideUp {
+      from { transform: translateY(14px); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+    @keyframes shimmerAnim {
+      0%   { background-position: -300% center; }
+      100% { background-position:  300% center; }
+    }
+    @keyframes pulse-ring {
+      0%  { box-shadow: 0 0 0 0   rgba(16,185,129,.55); }
+      70% { box-shadow: 0 0 0 10px rgba(16,185,129,0);   }
+      100%{ box-shadow: 0 0 0 0   rgba(16,185,129,0);    }
+    }
+    @keyframes bounceDot {
+      0%,80%,100%{ transform:scale(0); opacity:.3; }
+      40%        { transform:scale(1); opacity:1;  }
+    }
+
+    .page-enter { animation: slideUp 0.28s ease-out both; }
+
+    .shimmer-bar {
+      position: relative; overflow: hidden;
+    }
+    .shimmer-bar::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent 0%,
+        rgba(255,255,255,.14) 50%, transparent 100%);
+      background-size: 300% 100%;
+      animation: shimmerAnim 2.2s infinite linear;
+    }
+
+    .donation-row { animation: slideUp .3s ease-out both; }
+    .winner-badge { animation: pulse-ring 2s infinite; }
+
+    .loading-dot {
+      display: inline-block; width: 6px; height: 6px;
+      border-radius: 50%; background: currentColor;
+      animation: bounceDot 1.2s infinite ease-in-out both;
+    }
+    .loading-dot:nth-child(2) { animation-delay: .16s; }
+    .loading-dot:nth-child(3) { animation-delay: .32s; }
+
+    /* ── SVG jar liquid transition ───────── */
+    .jar-liquid-rect {
+      transition: y 1.3s cubic-bezier(.4,0,.2,1),
+                  height 1.3s cubic-bezier(.4,0,.2,1);
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<div id="root" class="max-w-md mx-auto min-h-screen">
+  <!-- Splash loader -->
+  <div class="flex flex-col items-center justify-center h-screen gap-3">
+    <div class="text-5xl">🫙</div>
+    <div class="flex gap-1.5" style="opacity:.5">
+      <span class="loading-dot"></span>
+      <span class="loading-dot"></span>
+      <span class="loading-dot"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════
+//  CONFIG  —  замінити на реальний URL n8n
+// ════════════════════════════════════════════════
+const CFG = {
+  N8N:     'https://sl1qq.app.n8n.cloud/webhook',
+  POLL_MS:  8_000,   // інтервал поллінгу учасника
+  MIN_UAH:  1,       // мін. внесок для відображення (грн)
+};
+
+// ════════════════════════════════════════════════
+//  TELEGRAM INIT
+// ════════════════════════════════════════════════
+const tg = window.Telegram?.WebApp;
+tg?.ready();
+tg?.expand();
+tg?.setHeaderColor('bg_color');
+tg?.setBottomBarColor('bg_color');
+
+const ME    = tg?.initDataUnsafe?.user ?? { id: 0, first_name: 'Гість' };
+const START = tg?.initDataUnsafe?.start_param ?? '';
+
+// ════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════
+const S = {
+  view:         'loading',   // loading|participant|organizer|detail|create
+  contest:      null,
+  transactions: [],
+  contests:     [],
+  pollId:       null,
+};
+
+// ════════════════════════════════════════════════
+//  API  (всі запити через n8n Webhooks)
+// ════════════════════════════════════════════════
+const API = {
+  async req(method, path, body) {
+    const r = await fetch(CFG.N8N + path, {
+      method,
+      headers: {
+        'Content-Type':   'application/json',
+        'X-Tg-Init-Data': tg?.initData ?? '',
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  },
+
+  getContest:      id  => API.req('GET',  `/contest-info?id=${encodeURIComponent(id)}`),
+  getTxns:         id  => API.req('GET',  `/contest-transactions?id=${encodeURIComponent(id)}`),
+  getActive:       ()  => API.req('GET',  `/contest/active`),
+  getMyContests:   ()  => API.req('GET',  `/organizer-contests?id=${encodeURIComponent(ME.id)}`),
+  createContest:   d   => API.req('POST', `/contest/create`, d),
+  exportUrl:       id  =>
+    `${CFG.N8N}/contest-export?id=${encodeURIComponent(id)}&tid=${encodeURIComponent(tg?.initData ?? '')}`,
+};
+
+// ════════════════════════════════════════════════
+//  UTILS
+// ════════════════════════════════════════════════
+const uah  = k => (k / 100).toLocaleString('uk-UA', { maximumFractionDigits: 0 }) + ' ₴';
+const pct  = (v, t) => t > 0 ? Math.min(100, v / t * 100) : 0;
+const esc  = s => String(s ?? '')
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const fmt_ts = iso => new Date(iso).toLocaleString('uk-UA',
+  { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+const donorName = t =>
+  (t.participant_name || t.comment || '').trim().slice(0, 28) || 'Анонім';
+
+function accentColor(p) {
+  if (p < 25) return '#ef4444';
+  if (p < 50) return '#f97316';
+  if (p < 75) return '#3b82f6';
+  return '#10b981';
+}
+
+function avatar(name, color, size = 36) {
+  const ch = (name || '?')[0].toUpperCase();
+  return `<div style="width:${size}px;height:${size}px;background:${color};border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    color:#fff;font-size:${Math.round(size*.42)}px;font-weight:700;flex-shrink:0">${ch}</div>`;
+}
+
+function stopPoll() {
+  if (S.pollId) { clearInterval(S.pollId); S.pollId = null; }
+}
+
+function startPoll(id) {
+  stopPoll();
+  S.pollId = setInterval(async () => {
+    try {
+      const [c, txns] = await Promise.all([API.getContest(id), API.getTxns(id)]);
+      const changed = (txns || []).length !== S.transactions.length || c.current_amount !== S.contest?.current_amount;
+      S.contest      = c;
+      S.transactions = txns || [];
+      if (changed && S.view === 'participant') mount();
+    } catch { /* silent */ }
+  }, CFG.POLL_MS);
+}
+
+// ════════════════════════════════════════════════
+//  JAR SVG  (анімована банка)
+// ════════════════════════════════════════════════
+function JarSVG(filledPct, color) {
+  const AREA_H   = 172;   // висота зони рідини
+  const BASE_Y   = 222;   // нижня межа банки
+  const liquidH  = Math.round(AREA_H * filledPct / 100);
+  const rectY    = BASE_Y - liquidH;
+
+  const bubbles = (filledPct > 5 && filledPct < 97)
+    ? [{ x:58, r:4, delay:'0s' }, { x:88, r:6, delay:'.9s' }, { x:112, r:3, delay:'1.7s' }]
+    : [];
+
+  return `
+<svg viewBox="0 0 174 248" xmlns="http://www.w3.org/2000/svg"
+     style="width:148px;height:210px;display:block">
+  <defs>
+    <clipPath id="jc">
+      <path d="M26,60 C24,60 19,234 87,234 C155,234 150,60 148,60 Z"/>
+    </clipPath>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"   stop-color="${color}" stop-opacity=".55"/>
+      <stop offset="50%"  stop-color="${color}" stop-opacity=".9"/>
+      <stop offset="100%" stop-color="${color}" stop-opacity=".55"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Jar body background tint -->
+  <path d="M26,60 C24,60 19,234 87,234 C155,234 150,60 148,60 Z"
+        fill="${color}" opacity=".07"
+        stroke="${color}" stroke-width="2.5" stroke-opacity=".5"/>
+
+  <!-- Liquid fill -->
+  <rect class="jar-liquid-rect"
+        x="0" y="${rectY}" width="174" height="${liquidH + 18}"
+        fill="url(#lg)" clip-path="url(#jc)"/>
+
+  <!-- Wave on liquid surface -->
+  ${filledPct > 2 && filledPct < 98 ? `
+  <path d="M26,${rectY} Q57,${rectY-5} 87,${rectY} Q117,${rectY+5} 148,${rectY}"
+        fill="none" stroke="rgba(255,255,255,.3)" stroke-width="2"
+        clip-path="url(#jc)"/>` : ''}
+
+  <!-- Bubbles (SVG animate) -->
+  ${bubbles.map(b => `
+  <circle cx="${b.x}" cy="${BASE_Y - 10}" r="${b.r}"
+          fill="rgba(255,255,255,.28)" clip-path="url(#jc)">
+    <animate attributeName="cy" dur="2.8s" begin="${b.delay}" repeatCount="indefinite"
+             values="${BASE_Y - 10};${rectY + 12}"/>
+    <animate attributeName="opacity" dur="2.8s" begin="${b.delay}" repeatCount="indefinite"
+             values=".5;0"/>
+  </circle>`).join('')}
+
+  <!-- Jar outline (above liquid) -->
+  <path d="M26,60 C24,60 19,234 87,234 C155,234 150,60 148,60 Z"
+        fill="none" stroke="${color}" stroke-width="2.5" stroke-opacity=".65"/>
+
+  <!-- Neck -->
+  <rect x="49" y="44" width="76" height="20" rx="9"
+        fill="${color}" opacity=".13" stroke="${color}" stroke-width="2" stroke-opacity=".5"/>
+
+  <!-- Lid -->
+  <rect x="39" y="26" width="96" height="20" rx="8"
+        fill="${color}" opacity=".82"/>
+  <rect x="39" y="26" width="96" height="20" rx="8"
+        fill="none" stroke="${color}" stroke-width="1.5" stroke-opacity=".4"/>
+
+  <!-- Percentage label inside jar -->
+  ${filledPct >= 12 ? `
+  <text x="87" y="${Math.max(rectY + 32, 220)}"
+        text-anchor="middle" font-size="22" font-weight="700"
+        fill="${filledPct > 48 ? 'rgba(255,255,255,.95)' : color}"
+        filter="url(#glow)">${filledPct.toFixed(0)}%</text>`
+  : `<text x="87" y="210" text-anchor="middle" font-size="14"
+           fill="${color}" opacity=".7">${filledPct.toFixed(0)}%</text>`}
+</svg>`;
+}
+
+// ════════════════════════════════════════════════
+//  VIEW: УЧАСНИК
+// ════════════════════════════════════════════════
+function viewParticipant() {
+  const c = S.contest;
+
+  if (!c) return `
+    <div class="flex flex-col items-center justify-center min-h-screen px-6 text-center">
+      <div style="font-size:64px;margin-bottom:16px">🫙</div>
+      <h2 style="font-size:20px;font-weight:700;margin-bottom:8px">Активних розіграшів немає</h2>
+      <p style="opacity:.5;font-size:14px">Слідкуй за оновленнями в каналі</p>
+    </div>`;
+
+  const p = pct(c.current_amount, c.target_amount);
+  const col = accentColor(p);
+  const remaining = Math.max(0, c.target_amount - c.current_amount);
+  const txns = S.transactions;
+  const uniq = new Set(txns.map(donorName)).size;
+
+  const byDonor = {};
+  txns.forEach(t => {
+    const k = donorName(t);
+    byDonor[k] = (byDonor[k] || 0) + t.amount;
+  });
+  const top5 = Object.entries(byDonor).sort((a,b) => b[1]-a[1]).slice(0,5);
+  const completed = c.status === 'completed';
+
+  return `
+<div style="padding-bottom:40px">
+
+  <!-- Статус-чіп -->
+  <div style="display:flex;justify-content:center;padding:20px 0 10px">
+    <span class="${completed ? 'winner-badge' : ''}"
+          style="font-size:11px;font-weight:700;letter-spacing:.06em;
+                 padding:5px 14px;border-radius:20px;
+                 background:${col}22;color:${col}">
+      ${completed ? '🏆&nbsp;РОЗІГРАШ ЗАВЕРШЕНО' : '🎁&nbsp;АКТИВНИЙ РОЗІГРАШ'}
+    </span>
+  </div>
+
+  <!-- Назва -->
+  <div style="text-align:center;padding:0 16px 16px">
+    <h1 style="font-size:22px;font-weight:700;line-height:1.2">${esc(c.title)}</h1>
+    <p style="font-size:13px;margin-top:5px;opacity:.6">
+      Приз:&nbsp;<strong>${esc(c.prize)}</strong>
+    </p>
+  </div>
+
+  <!-- Переможець (якщо завершено) -->
+  ${completed && c.winner_name ? `
+  <div style="margin:0 16px 20px;padding:16px;border-radius:18px;text-align:center;
+              background:linear-gradient(135deg,${col}18,${col}2e);
+              border:1px solid ${col}40">
+    <div style="font-size:40px;margin-bottom:6px">🏆</div>
+    <div style="font-size:18px;font-weight:700">${esc(c.winner_name)}</div>
+    <div style="font-size:12px;margin-top:4px;opacity:.6">
+      Внесок: ${uah(c.winner_amount ?? 0)}&nbsp;·&nbsp;
+      Шанс: ${c.target_amount ? (((c.winner_amount??0)/c.target_amount)*100).toFixed(1) : 0}%
+    </div>
+  </div>` : ''}
+
+  <!-- Банка -->
+  <div style="display:flex;justify-content:center;margin-bottom:16px">
+    ${JarSVG(p, col)}
+  </div>
+
+  <!-- Статистика (3 картки) -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 16px 16px">
+    ${[
+      [uah(c.current_amount), 'Зібрано',   col],
+      [uniq.toString(),       'Учасники',  'inherit'],
+      [uah(remaining),        'До фіналу', '#f59e0b'],
+    ].map(([v,lbl,c2]) => `
+    <div class="card" style="padding:12px 8px;text-align:center">
+      <div style="font-size:15px;font-weight:700;color:${c2};line-height:1.1">${v}</div>
+      <div style="font-size:11px;margin-top:3px;opacity:.5">${lbl}</div>
+    </div>`).join('')}
+  </div>
+
+  <!-- Прогрес-бар -->
+  <div style="padding:0 16px 20px">
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:6px;opacity:.55">
+      <span>${uah(c.current_amount)}</span>
+      <span>Ціль: ${uah(c.target_amount)}</span>
+    </div>
+    <div style="height:12px;border-radius:6px;overflow:hidden;background:${col}1a">
+      <div class="shimmer-bar"
+           style="height:100%;border-radius:6px;width:${p.toFixed(1)}%;
+                  background:${col};transition:width 1.3s ease">
+      </div>
+    </div>
+  </div>
+
+  <!-- Топ шанси -->
+  ${top5.length ? `
+  <div style="padding:0 16px 16px">
+    <p style="font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.48;margin-bottom:8px">
+      🎯&nbsp;ТОП УЧАСНИКИ
+    </p>
+    <div class="card" style="overflow:hidden">
+      ${top5.map(([name, amt], i) => {
+        const chance = c.current_amount > 0 ? (amt/c.current_amount*100).toFixed(1) : '0.0';
+        return `
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;
+                    ${i ? 'border-top:1px solid rgba(255,255,255,.06)' : ''}">
+          ${avatar(name, col)}
+          <div style="flex:1;min-width:0">
+            <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              ${esc(name)}
+            </div>
+            <div style="font-size:11px;margin-top:2px;opacity:.45">${uah(amt)}</div>
+          </div>
+          <div style="font-size:13px;font-weight:700;color:${col};flex-shrink:0">${chance}%</div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>` : ''}
+
+  <!-- Останні донати -->
+  <div style="padding:0 16px">
+    <p style="font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.48;margin-bottom:8px">
+      ⚡&nbsp;ОСТАННІ ДОНАТИ
+    </p>
+    ${txns.length === 0 ? `
+    <div class="card" style="padding:32px 16px;text-align:center;font-size:13px;opacity:.45">
+      Будь першим — поповни банку та отримай шанс виграти! 🚀
+    </div>` : `
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${txns.slice(0,25).map((t, idx) => `
+      <div class="card donation-row" style="display:flex;align-items:center;gap:12px;
+               padding:12px 16px;animation-delay:${idx*.04}s">
+        ${avatar(donorName(t), col)}
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            ${esc(donorName(t))}
+          </div>
+          <div style="font-size:11px;margin-top:2px;opacity:.42">${fmt_ts(t.timestamp)}</div>
+        </div>
+        <div style="font-size:13px;font-weight:700;color:${col};flex-shrink:0">
+          +${uah(t.amount)}
+        </div>
+      </div>`).join('')}
+    </div>`}
+  </div>
+
+</div>`;
+}
+
+// ════════════════════════════════════════════════
+//  VIEW: КАБІНЕТ ОРГАНІЗАТОРА
+// ════════════════════════════════════════════════
+function viewOrganizer() {
+  const contests = S.contests;
+  return `
+<div style="padding-bottom:40px">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              padding:22px 16px 16px">
+    <div>
+      <h1 style="font-size:20px;font-weight:700">Мої розіграші</h1>
+      <p style="font-size:11px;margin-top:2px;opacity:.45">Кабінет організатора</p>
+    </div>
+    <button class="btn-primary" onclick="nav('create')"
+            style="padding:10px 18px;font-size:13px">+ Новий</button>
+  </div>
+
+  ${contests.length === 0 ? `
+  <div class="card" style="margin:0 16px;padding:40px 16px;text-align:center">
+    <div style="font-size:52px;margin-bottom:12px">🎁</div>
+    <h3 style="font-weight:700;margin-bottom:6px">Немає розіграшів</h3>
+    <p style="font-size:13px;opacity:.5;margin-bottom:20px">Створи перший розіграш прямо зараз</p>
+    <button class="btn-primary" onclick="nav('create')"
+            style="padding:12px 28px;font-size:14px">Створити</button>
+  </div>` : `
+  <div style="padding:0 16px;display:flex;flex-direction:column;gap:10px">
+    ${contests.map(c => {
+      const p = pct(c.current_amount, c.target_amount);
+      const col = accentColor(p);
+      const labels = { active:'🟢 Активний', completed:'✅ Завершено', cancelled:'🔴 Скасовано' };
+      return `
+      <div class="card" style="padding:16px;cursor:pointer" onclick="navDetail('${esc(c.id)}')">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px">
+          <div style="flex:1;min-width:0;padding-right:10px">
+            <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              ${esc(c.title)}
+            </div>
+            <div style="font-size:12px;margin-top:2px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              ${esc(c.prize)}
+            </div>
+          </div>
+          <span style="font-size:11px;padding:4px 10px;border-radius:20px;flex-shrink:0;
+                       background:${col}22;color:${col}">
+            ${labels[c.status] || c.status}
+          </span>
+        </div>
+        <div style="height:8px;border-radius:4px;overflow:hidden;margin-bottom:6px;background:${col}1a">
+          <div style="height:100%;border-radius:4px;width:${p.toFixed(1)}%;background:${col}"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;opacity:.45">
+          <span>${uah(c.current_amount)} / ${uah(c.target_amount)}</span>
+          <span>${p.toFixed(1)}%</span>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`}
+</div>`;
+}
+
+// ════════════════════════════════════════════════
+//  VIEW: ДЕТАЛІ КОНКУРСУ (організатор)
+// ════════════════════════════════════════════════
+function viewDetail() {
+  const c = S.contest;
+  if (!c) return `<div style="padding:40px;text-align:center;opacity:.5">Не знайдено</div>`;
+
+  const p   = pct(c.current_amount, c.target_amount);
+  const col = accentColor(p);
+  const txns = S.transactions;
+  const uniq = new Set(txns.map(donorName)).size;
+  const hourAgo = Date.now() - 3_600_000;
+  const lastHr  = txns.filter(t => new Date(t.timestamp) > hourAgo)
+                       .reduce((s,t) => s + t.amount, 0);
+
+  return `
+<div style="padding-bottom:40px">
+  <!-- Назад -->
+  <div style="display:flex;align-items:center;gap:10px;padding:14px 16px">
+    <button class="card" onclick="nav('organizer')"
+            style="width:38px;height:38px;display:flex;align-items:center;justify-content:center;
+                   border:none;cursor:pointer;flex-shrink:0;color:inherit">
+      <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/>
+      </svg>
+    </button>
+    <h2 style="font-size:18px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+      ${esc(c.title)}
+    </h2>
+  </div>
+
+  <!-- Dashboard grid -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 16px 12px">
+    <!-- Прогрес (wide) -->
+    <div class="card" style="grid-column:1/-1;padding:16px">
+      <div style="font-size:26px;font-weight:700;color:${col}">${uah(c.current_amount)}</div>
+      <div style="font-size:12px;margin-top:2px;margin-bottom:10px;opacity:.5">
+        з ${uah(c.target_amount)}&nbsp;·&nbsp;${p.toFixed(1)}%
+      </div>
+      <div style="height:10px;border-radius:5px;overflow:hidden;background:${col}1a">
+        <div class="shimmer-bar"
+             style="height:100%;border-radius:5px;width:${p.toFixed(1)}%;background:${col}"></div>
+      </div>
+    </div>
+    ${[
+      [uniq.toString(),    'Учасників'],
+      [txns.length + '',   'Транзакцій'],
+      [uah(lastHr),        'За годину'],
+      [uah(Math.max(0, c.target_amount - c.current_amount)), 'Залишилось'],
+    ].map(([v,lbl]) => `
+    <div class="card" style="padding:14px">
+      <div style="font-size:20px;font-weight:700">${v}</div>
+      <div style="font-size:11px;margin-top:3px;opacity:.45">${lbl}</div>
+    </div>`).join('')}
+  </div>
+
+  <!-- Переможець -->
+  ${c.status === 'completed' && c.winner_name ? `
+  <div style="margin:0 16px 12px;padding:16px;border-radius:18px;text-align:center;
+              background:linear-gradient(135deg,${col}18,${col}2e);border:1px solid ${col}40">
+    <div style="font-size:44px;margin-bottom:6px">🏆</div>
+    <div style="font-size:18px;font-weight:700">${esc(c.winner_name)}</div>
+    <div style="font-size:12px;margin-top:4px;opacity:.6">
+      ${uah(c.winner_amount ?? 0)}&nbsp;·&nbsp;
+      Шанс: ${c.target_amount ? (((c.winner_amount??0)/c.target_amount)*100).toFixed(1) : 0}%
+    </div>
+  </div>` : ''}
+
+  <!-- Експорт в Excel -->
+  <div style="padding:0 16px 12px">
+    <a href="${API.exportUrl(c.id)}" class="card"
+       style="display:flex;align-items:center;gap:12px;padding:14px 16px;
+              text-decoration:none;color:inherit">
+      <span style="font-size:26px">📥</span>
+      <div>
+        <div style="font-weight:600;font-size:14px">Завантажити Excel</div>
+        <div style="font-size:11px;margin-top:2px;opacity:.45">Всі транзакції з деталями</div>
+      </div>
+      <svg style="margin-left:auto;opacity:.35" width="18" height="18"
+           fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+    </a>
+  </div>
+
+  <!-- Транзакції -->
+  <div style="padding:0 16px">
+    <p style="font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.45;margin-bottom:8px">
+      ТРАНЗАКЦІЇ (${txns.length})
+    </p>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${txns.length === 0 ? `
+      <div class="card" style="padding:28px;text-align:center;font-size:13px;opacity:.45">
+        Транзакцій ще немає
+      </div>` :
+      txns.slice(0,100).map((t, i) => `
+      <div class="card" style="display:flex;align-items:center;gap:10px;padding:12px 14px">
+        <span style="font-size:11px;width:22px;text-align:center;opacity:.32;flex-shrink:0">${i+1}</span>
+        ${avatar(donorName(t), col, 34)}
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            ${esc(donorName(t))}
+          </div>
+          <div style="font-size:11px;margin-top:2px;opacity:.4">${fmt_ts(t.timestamp)}</div>
+        </div>
+        <div style="font-size:13px;font-weight:700;color:${col};flex-shrink:0">
+          +${uah(t.amount)}
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>
+</div>`;
+}
+
+// ════════════════════════════════════════════════
+//  VIEW: ФОРМА СТВОРЕННЯ
+// ════════════════════════════════════════════════
+function viewCreate() {
+  return `
+<div style="padding-bottom:40px">
+  <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 16px">
+    <button class="card" onclick="nav('organizer')"
+            style="width:38px;height:38px;display:flex;align-items:center;justify-content:center;
+                   border:none;cursor:pointer;flex-shrink:0;color:inherit">
+      <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/>
+      </svg>
+    </button>
+    <h2 style="font-size:18px;font-weight:700">Новий розіграш</h2>
+  </div>
+
+  <div style="padding:0 16px;display:flex;flex-direction:column;gap:16px">
+
+    ${[
+      ['f-title',   'text',     'НАЗВА РОЗІГРАШУ',         'Розіграш iPhone 16 Pro',  ''],
+      ['f-prize',   'text',     'ПРИЗ',                    'iPhone 16 Pro 256GB',      ''],
+      ['f-target',  'number',   'СУМА-ЦІЛЬ (ГРН)',         '5000',                     'Мінімум 100 грн'],
+      ['f-mindon',  'number',   'МІН. ВНЕСОК (ГРН)',       '50',                       'Дрібніші донати ігноруються'],
+      ['f-token',   'password', 'ТОКЕН MONOBANK API',      'u…',                       'Видається на api.monobank.ua'],
+      ['f-jarid',   'text',     'ID БАНКИ',                'jar_XXXXXXXXXXXXXXXXX',    'Зі посилання на банку'],
+    ].map(([id, type, label, ph, hint]) => `
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;
+                    opacity:.5;margin-bottom:6px">${label}</label>
+      <input id="${id}" type="${type}" placeholder="${ph}"
+             ${type === 'number' ? 'min="1" step="1"' : ''}
+             ${id === 'f-mindon' ? 'value="50"' : ''}
+             ${id === 'f-token'  ? 'autocomplete="off" spellcheck="false"' : ''}
+             style="${id === 'f-token' || id === 'f-jarid' ? 'font-family:monospace;font-size:13px' : ''}">
+      ${hint ? `<p style="font-size:11px;margin-top:5px;opacity:.4">${hint}</p>` : ''}
+    </div>`).join('')}
+
+    <!-- Роз'яснення механіки -->
+    <div class="card" style="padding:16px;font-size:12px;line-height:1.65;opacity:.6">
+      <p style="font-weight:600;margin-bottom:6px">ℹ️ Як працює рандомайзер</p>
+      <p>• Кожен, хто поповнив банку — автоматично учасник</p>
+      <p>• Шанс перемоги: <b>P = v / V</b> (твій внесок / загальна сума)</p>
+      <p>• При досягненні цілі — криптографічно захищений вибір</p>
+      <p>• Переможець і організатор отримують сповіщення в Telegram</p>
+    </div>
+
+    <div id="form-err" style="display:none;font-size:13px;text-align:center;
+         padding:12px 16px;border-radius:12px;background:#ef444420;color:#ef4444"></div>
+
+    <button id="btn-create" class="btn-primary"
+            onclick="doCreate()"
+            style="padding:16px;font-size:15px;width:100%">
+      🎁 Створити розіграш
+    </button>
+  </div>
+</div>`;
+}
+
+// ════════════════════════════════════════════════
+//  NAVIGATION
+// ════════════════════════════════════════════════
+function mount() {
+  const fns = { participant: viewParticipant, organizer: viewOrganizer, detail: viewDetail, create: viewCreate };
+  document.getElementById('root').innerHTML =
+    `<div class="page-enter">${(fns[S.view] ?? (() => ''))()}</div>`;
+}
+
+function showSpinner() {
+  document.getElementById('root').innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:12px">
+      <div style="font-size:44px">🫙</div>
+      <div style="display:flex;gap:6px;opacity:.5">
+        <span class="loading-dot"></span>
+        <span class="loading-dot"></span>
+        <span class="loading-dot"></span>
+      </div>
+    </div>`;
+}
+
+async function nav(view) {
+  stopPoll();
+  if (view === 'organizer') {
+    showSpinner();
+    try { S.contests = (await API.getMyContests()) || []; } catch { S.contests = []; }
+  }
+  S.view = view;
+  mount();
+}
+
+async function navDetail(id) {
+  showSpinner();
+  try {
+    const [c, txns] = await Promise.all([API.getContest(id), API.getTxns(id)]);
+    S.contest = c; S.transactions = txns || [];
+  } catch { tg?.showAlert('Помилка завантаження'); return; }
+  S.view = 'detail';
+  mount();
+}
+
+async function doCreate() {
+  const g = id => document.getElementById(id)?.value?.trim() ?? '';
+  const title  = g('f-title');
+  const prize  = g('f-prize');
+  const target = parseFloat(g('f-target') || '0');
+  const minDon = parseFloat(g('f-mindon') || '50');
+  const token  = g('f-token');
+  const jarId  = g('f-jarid');
+
+  const errEl = document.getElementById('form-err');
+  const showErr = m => { errEl.textContent = m; errEl.style.display = 'block'; };
+  errEl.style.display = 'none';
+
+  if (!title)                  return showErr('Введи назву розіграшу');
+  if (!prize)                  return showErr('Введи опис призу');
+  if (!target || target < 100) return showErr('Мінімальна ціль — 100 грн');
+  if (!token || token.length < 8) return showErr('Невірний токен Monobank API');
+  if (!jarId)                  return showErr('Введи ID банки');
+
+  const btn = document.getElementById('btn-create');
+  btn.disabled = true; btn.textContent = '⏳ Створення...';
+
+  try {
+    await API.createContest({
+      title, prize,
+      target_amount: Math.round(target * 100),
+      min_donation:  Math.round(minDon  * 100),
+      mono_token: token,
+      jar_id:     jarId,
+      organizer_id:   String(ME.id),
+      organizer_name: [ME.first_name, ME.last_name].filter(Boolean).join(' ') || ME.username || 'Організатор',
+    });
+    tg?.showAlert('✅ Розіграш успішно створено!');
+    await nav('organizer');
+  } catch {
+    showErr('Помилка. Перевір токен і ID банки.');
+    btn.disabled = false; btn.textContent = '🎁 Створити розіграш';
+  }
+}
+
+// ════════════════════════════════════════════════
+//  BOOT
+// ════════════════════════════════════════════════
+async function boot() {
+  if (START === 'organizer') {
+    await nav('organizer');
+    return;
+  }
+
+  if (START.startsWith('c_')) {
+    const id = START.slice(2);
+    try {
+      const [c, txns] = await Promise.all([API.getContest(id), API.getTxns(id)]);
+      S.contest = c; S.transactions = txns || [];
+    } catch { S.contest = null; S.transactions = []; }
+    S.view = 'participant';
+    mount();
+    if (S.contest?.status === 'active') startPoll(S.contest.id);
+    return;
+  }
+
+  // Default: активний конкурс
+  try {
+    const d = await API.getActive();
+    S.contest      = d.contest      ?? null;
+    S.transactions = d.transactions ?? [];
+  } catch { S.contest = null; S.transactions = []; }
+  S.view = 'participant';
+  mount();
+  if (S.contest?.status === 'active') startPoll(S.contest.id);
+}
+
+boot();
+</script>
+</body>
+</html>
