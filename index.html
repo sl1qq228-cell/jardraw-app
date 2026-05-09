@@ -155,8 +155,13 @@ const API = {
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+    const json = await r.json().catch(() => null);
+    if (!r.ok) {
+      const msg = json?.message || json?.error || `HTTP ${r.status}`;
+      throw new Error(msg);
+    }
+    if (json?.error) throw new Error(json.error);
+    return json;
   },
 
   getContest:      id  => API.req('GET',  `/contest-info?id=${encodeURIComponent(id)}`),
@@ -762,8 +767,8 @@ async function doCreate() {
     });
     tg?.showAlert('✅ Розіграш успішно створено!');
     await nav('organizer');
-  } catch {
-    showErr('Помилка. Перевір токен і ID банки.');
+  } catch (e) {
+    showErr(e.message || 'Помилка. Перевір токен і ID банки.');
     btn.disabled = false; btn.textContent = '🎁 Створити розіграш';
   }
 }
