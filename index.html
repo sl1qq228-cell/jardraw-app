@@ -6,7 +6,8 @@
   <title>JarDraw — Авторозіграші Monobank</title>
   <link rel="canonical" href="https://sl1qq228-cell.github.io/jardraw-app/">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script>if(!window.fetch){document.write('<script src="https://cdn.jsdelivr.net/npm/whatwg-fetch@3.6.20/fetch.min.js"><\/script>');}</script>
+  <script>
+  if(!window.fetch){window.fetch=function(u,o){return new Promise(function(res,rej){var x=new XMLHttpRequest();x.open((o&&o.method)||'GET',u);if(o&&o.headers)Object.keys(o.headers).forEach(function(k){x.setRequestHeader(k,o.headers[k]);});x.onload=function(){var status=x.status;res({ok:status>=200&&status<300,status:status,json:function(){try{return Promise.resolve(JSON.parse(x.responseText));}catch(e){return Promise.reject(e);}}});};x.onerror=function(){rej(new Error('Network error'));};x.send((o&&o.body)||null);});};}</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     /* ── Base ───────────────────────────── */
