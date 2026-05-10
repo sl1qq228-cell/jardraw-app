@@ -136,11 +136,14 @@ const START = tg?.initDataUnsafe?.start_param ?? '';
 //  STATE
 // ════════════════════════════════════════════════
 const S = {
-  view:         'loading',   // loading|participant|organizer|detail|create
-  prevView:     'participant',
+  view:         'loading',   // loading|home|participant|organizer|detail|create
+  prevView:     'home',
   contest:      null,
   transactions: [],
   contests:     [],
+  allContests:  [],
+  homeSearch:   '',
+  homePage:     1,
   pollId:       null,
 };
 
@@ -170,6 +173,8 @@ const API = {
   getTxns:         id  => API.req('GET',  `/contest-transactions?id=${encodeURIComponent(id)}`),
   getActive:       ()  => API.req('GET',  `/contest/active`),
   getMyContests:   ()  => API.req('GET',  `/organizer-contests?id=${encodeURIComponent(ME.id)}`),
+  getAllContests:   ()  => API.req('GET',  `/contests`),
+  getJarInfo: (t, s)   => API.req('GET',  `/jar-info?token=${encodeURIComponent(t)}&send_id=${encodeURIComponent(s)}`),
   createContest:   d   => API.req('POST', `/contest/create`, d),
   exportUrl:       id  =>
     `${CFG.N8N}/contest-export?id=${encodeURIComponent(id)}&tid=${encodeURIComponent(tg?.initData ?? '')}`,
@@ -301,6 +306,106 @@ function JarSVG(filledPct, color) {
 }
 
 // ════════════════════════════════════════════════
+//  VIEW: ГОЛОВНА — список розіграшів
+// ════════════════════════════════════════════════
+function viewHome() {
+  const PAGE_SIZE = 10;
+  const search = S.homeSearch.toLowerCase();
+
+  let filtered = S.allContests;
+  if (search) {
+    filtered = filtered.filter(c =>
+      (c.title||'').toLowerCase().includes(search) ||
+      (c.prize||'').toLowerCase().includes(search)
+    );
+  }
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const page = Math.min(S.homePage, totalPages);
+  const items = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const activeCount = S.allContests.filter(c => c.status === 'active').length;
+
+  const labels = { active:'🟢 Активний', completed:'✅ Завершено', cancelled:'🔴 Скасовано' };
+
+  return `
+<div style="padding-bottom:40px">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:22px 16px 12px">
+    <div>
+      <h1 style="font-size:22px;font-weight:700">Розіграші</h1>
+      <p style="font-size:12px;margin-top:2px;opacity:.45">${activeCount > 0 ? `${activeCount} активних` : 'Немає активних'}</p>
+    </div>
+    <button class="btn-primary" onclick="nav('organizer')"
+            style="padding:9px 16px;font-size:13px;background:rgba(255,255,255,.1);
+                   color:rgba(255,255,255,.75)">Кабінет</button>
+  </div>
+
+  <div style="padding:0 16px 16px">
+    <input type="search" placeholder="🔍 Пошук розіграшу..."
+           value="${esc(S.homeSearch)}"
+           oninput="homeFilter(this.value)"
+           style="width:100%">
+  </div>
+
+  ${items.length === 0 ? `
+  <div style="text-align:center;padding:60px 16px">
+    <div style="font-size:52px;margin-bottom:12px">${search ? '🔍' : '🫙'}</div>
+    <p style="opacity:.45;font-size:14px">${search ? 'Нічого не знайдено' : 'Розіграшів поки немає'}</p>
+  </div>` : `
+  <div style="padding:0 16px;display:flex;flex-direction:column;gap:10px">
+    ${items.map(c => {
+      const p = pct(c.current_amount, c.target_amount);
+      const col = accentColor(p);
+      return `
+      <div class="card" style="padding:16px;cursor:pointer" onclick="navContest('${esc(c.id)}')">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px">
+          <div style="flex:1;min-width:0;padding-right:10px">
+            <div style="font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              ${esc(c.title)}
+            </div>
+            <div style="font-size:12px;margin-top:2px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              🎁 ${esc(c.prize)}
+            </div>
+            ${c.venue ? `<div style="font-size:11px;margin-top:2px;opacity:.4">📍 ${esc(c.venue)}</div>` : ''}
+          </div>
+          <span style="font-size:11px;padding:4px 10px;border-radius:20px;flex-shrink:0;
+                       background:${col}22;color:${col}">
+            ${labels[c.status] || c.status}
+          </span>
+        </div>
+        <div style="height:6px;border-radius:3px;overflow:hidden;margin-bottom:6px;background:${col}1a">
+          <div style="height:100%;border-radius:3px;width:${p.toFixed(1)}%;background:${col}"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;opacity:.45">
+          <span>${uah(c.current_amount)} / ${uah(c.target_amount)}</span>
+          <span>${p.toFixed(1)}%</span>
+        </div>
+        ${c.status === 'completed' && c.winner_name ? `
+        <div style="margin-top:8px;font-size:12px;color:#f59e0b">🏆 ${esc(c.winner_name)}</div>` : ''}
+      </div>`;
+    }).join('')}
+  </div>
+
+  ${totalPages > 1 ? `
+  <div style="display:flex;justify-content:center;align-items:center;gap:12px;padding:20px 16px 0">
+    <button ${page <= 1 ? 'disabled' : ''} onclick="homeSetPage(${page-1})"
+            class="card" style="padding:8px 16px;border:none;cursor:pointer;color:inherit;
+                                opacity:${page <= 1 ? .3 : 1}">← Назад</button>
+    <span style="font-size:13px;opacity:.5">${page} / ${totalPages}</span>
+    <button ${page >= totalPages ? 'disabled' : ''} onclick="homeSetPage(${page+1})"
+            class="card" style="padding:8px 16px;border:none;cursor:pointer;color:inherit;
+                                opacity:${page >= totalPages ? .3 : 1}">Далі →</button>
+  </div>` : ''}
+  `}
+
+  <div style="padding:24px 16px 0">
+    <button class="btn-primary" onclick="nav('create')" style="width:100%;padding:14px;font-size:15px">
+      + Створити розіграш
+    </button>
+  </div>
+</div>`;
+}
+
+// ════════════════════════════════════════════════
 //  VIEW: УЧАСНИК
 // ════════════════════════════════════════════════
 function viewParticipant() {
@@ -316,6 +421,17 @@ function viewParticipant() {
         + Створити розіграш
       </button>
     </div>`;
+
+  const backBtn = S.prevView === 'home' ? `
+  <div style="padding:14px 16px 0">
+    <button class="card" onclick="nav('home')"
+            style="width:38px;height:38px;display:flex;align-items:center;justify-content:center;
+                   border:none;cursor:pointer;flex-shrink:0;color:inherit">
+      <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/>
+      </svg>
+    </button>
+  </div>` : '';
 
   const p = pct(c.current_amount, c.target_amount);
   const col = accentColor(p);
@@ -333,6 +449,7 @@ function viewParticipant() {
 
   return `
 <div style="padding-bottom:40px">
+  ${backBtn}
 
   <!-- Статус-чіп -->
   <div style="display:flex;justify-content:center;padding:20px 0 10px">
@@ -641,7 +758,7 @@ function viewCreate() {
   return `
 <div style="padding-bottom:40px">
   <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 16px">
-    <button class="card" onclick="nav(S.prevView || 'participant')"
+    <button class="card" onclick="nav(S.prevView || 'home')"
             style="width:38px;height:38px;display:flex;align-items:center;justify-content:center;
                    border:none;cursor:pointer;flex-shrink:0;color:inherit">
       <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -653,26 +770,95 @@ function viewCreate() {
 
   <div style="padding:0 16px;display:flex;flex-direction:column;gap:16px">
 
-    ${[
-      ['f-title',   'text',     'НАЗВА РОЗІГРАШУ',         'Розіграш iPhone 16 Pro',  ''],
-      ['f-prize',   'text',     'ПРИЗ',                    'iPhone 16 Pro 256GB',      ''],
-      ['f-target',  'number',   'СУМА-ЦІЛЬ (ГРН)',         '5000',                     'Мінімум 100 грн'],
-      ['f-mindon',  'number',   'МІН. ВНЕСОК (ГРН)',       '50',                       'Дрібніші донати ігноруються'],
-      ['f-token',   'password', 'ТОКЕН MONOBANK API',      'u…',                       'Видається на api.monobank.ua'],
-      ['f-jarid',   'text',     'ID БАНКИ',                'jar_XXXXXXXXXXXXXXXXX',    'Зі посилання на банку'],
-    ].map(([id, type, label, ph, hint]) => `
+    <!-- Токен Monobank -->
     <div>
-      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;
-                    opacity:.5;margin-bottom:6px">${label}</label>
-      <input id="${id}" type="${type}" placeholder="${ph}"
-             ${type === 'number' ? 'min="1" step="1"' : ''}
-             ${id === 'f-mindon' ? 'value="50"' : ''}
-             ${id === 'f-token'  ? 'autocomplete="off" spellcheck="false"' : ''}
-             style="${id === 'f-token' || id === 'f-jarid' ? 'font-family:monospace;font-size:13px' : ''}">
-      ${hint ? `<p style="font-size:11px;margin-top:5px;opacity:.4">${hint}</p>` : ''}
-    </div>`).join('')}
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        ТОКЕН MONOBANK API
+      </label>
+      <input id="f-token" type="password" placeholder="u…"
+             autocomplete="off" spellcheck="false"
+             style="font-family:monospace;font-size:13px">
+      <p style="font-size:12px;margin-top:6px;opacity:.55;line-height:1.5">
+        Отримай токен на
+        <a href="https://api.monobank.ua" target="_blank"
+           style="color:var(--tg-theme-button-color,#007aff);text-decoration:none">api.monobank.ua</a>
+        → «Для особистого використання» → скопіюй токен.
+        <br>⚠️ Токен дає доступ до твоїх рахунків — нікому не передавай.
+      </p>
+    </div>
 
-    <!-- Роз'яснення механіки -->
+    <!-- Посилання на банку + кнопка fetch -->
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        ПОСИЛАННЯ НА БАНКУ
+      </label>
+      <input id="f-jarurl" type="url" placeholder="https://send.monobank.ua/jar/…"
+             style="font-family:monospace;font-size:13px">
+      <p style="font-size:11px;margin-top:5px;opacity:.4">
+        Скопіюй посилання з банки Monobank (кнопка «Поділитись»)
+      </p>
+    </div>
+
+    <button id="btn-fetch-jar" class="btn-primary"
+            onclick="fetchJarInfo()"
+            style="padding:12px;font-size:14px;width:100%;
+                   background:rgba(255,255,255,.1);color:rgba(255,255,255,.8)">
+      🔍 Отримати дані банки
+    </button>
+
+    <div id="jar-err" style="display:none;font-size:13px;padding:12px 16px;
+         border-radius:12px;background:#ef444420;color:#ef4444"></div>
+
+    <div id="jar-preview" style="display:none" class="card">
+      <div style="padding:14px 16px;font-size:13px;line-height:1.6;color:var(--tg-theme-text-color,#fff)"></div>
+    </div>
+
+    <input type="hidden" id="f-jarid-hidden">
+
+    <!-- Назва розіграшу -->
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        НАЗВА РОЗІГРАШУ
+      </label>
+      <input id="f-title" type="text" placeholder="Розіграш iPhone 16 Pro">
+      <p style="font-size:11px;margin-top:5px;opacity:.4">Підтягується з банки, але можна змінити</p>
+    </div>
+
+    <!-- Де проходить розіграш -->
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        ДЕ ПРОХОДИТЬ РОЗІГРАШ
+      </label>
+      <input id="f-venue" type="text" placeholder="Telegram-канал @mychannel, стрім на YouTube…">
+    </div>
+
+    <!-- Приз -->
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        ПРИЗ
+      </label>
+      <input id="f-prize" type="text" placeholder="iPhone 16 Pro 256GB">
+    </div>
+
+    <!-- Ціль -->
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        СУМА-ЦІЛЬ (ГРН)
+      </label>
+      <input id="f-target" type="number" placeholder="5000" min="100" step="1">
+      <p style="font-size:11px;margin-top:5px;opacity:.4">Підтягується з банки автоматично · Мінімум 100 грн</p>
+    </div>
+
+    <!-- Мін. внесок -->
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;letter-spacing:.06em;opacity:.5;margin-bottom:6px">
+        МІН. ВНЕСОК (ГРН)
+      </label>
+      <input id="f-mindon" type="number" value="50" min="1" step="1">
+      <p style="font-size:11px;margin-top:5px;opacity:.4">Дрібніші донати ігноруються</p>
+    </div>
+
+    <!-- Механіка -->
     <div class="card" style="padding:16px;font-size:12px;line-height:1.65;opacity:.6">
       <p style="font-weight:600;margin-bottom:6px">ℹ️ Як працює рандомайзер</p>
       <p>• Кожен, хто поповнив банку — автоматично учасник</p>
@@ -697,7 +883,7 @@ function viewCreate() {
 //  NAVIGATION
 // ════════════════════════════════════════════════
 function mount() {
-  const fns = { participant: viewParticipant, organizer: viewOrganizer, detail: viewDetail, create: viewCreate };
+  const fns = { home: viewHome, participant: viewParticipant, organizer: viewOrganizer, detail: viewDetail, create: viewCreate };
   document.getElementById('root').innerHTML =
     `<div class="page-enter">${(fns[S.view] ?? (() => ''))()}</div>`;
 }
@@ -721,8 +907,25 @@ async function nav(view) {
     showSpinner();
     try { S.contests = (await API.getMyContests()) || []; } catch { S.contests = []; }
   }
+  if (view === 'home') {
+    showSpinner();
+    S.homePage = 1;
+    try { S.allContests = (await API.getAllContests()) || []; } catch { S.allContests = []; }
+  }
   S.view = view;
   mount();
+}
+
+async function navContest(id) {
+  showSpinner();
+  try {
+    const [c, txns] = await Promise.all([API.getContest(id), API.getTxns(id)]);
+    S.contest = c; S.transactions = txns || [];
+  } catch { tg?.showAlert('Помилка завантаження'); return; }
+  S.prevView = S.view;
+  S.view = 'participant';
+  mount();
+  if (S.contest?.status === 'active') startPoll(S.contest.id);
 }
 
 async function navDetail(id) {
@@ -731,6 +934,7 @@ async function navDetail(id) {
     const [c, txns] = await Promise.all([API.getContest(id), API.getTxns(id)]);
     S.contest = c; S.transactions = txns || [];
   } catch { tg?.showAlert('Помилка завантаження'); return; }
+  S.prevView = S.view;
   S.view = 'detail';
   mount();
 }
@@ -742,24 +946,32 @@ async function doCreate() {
   const target = parseFloat(g('f-target') || '0');
   const minDon = parseFloat(g('f-mindon') || '50');
   const token  = g('f-token');
-  const jarId  = g('f-jarid');
+  const jarUrl = g('f-jarurl');
+  const venue  = g('f-venue');
+
+  // Parse sendId: from hidden field (set by fetchJarInfo), full URL, or bare sendId
+  let jarId = g('f-jarid-hidden');
+  if (!jarId) {
+    const m = jarUrl.match(/send\.monobank\.ua\/jar\/([^/?#\s]+)/);
+    jarId = m ? m[1] : jarUrl;
+  }
 
   const errEl = document.getElementById('form-err');
   const showErr = m => { errEl.textContent = m; errEl.style.display = 'block'; };
   errEl.style.display = 'none';
 
-  if (!title)                  return showErr('Введи назву розіграшу');
-  if (!prize)                  return showErr('Введи опис призу');
-  if (!target || target < 100) return showErr('Мінімальна ціль — 100 грн');
+  if (!title)                     return showErr('Введи назву розіграшу');
+  if (!prize)                     return showErr('Введи опис призу');
+  if (!target || target < 100)    return showErr('Мінімальна ціль — 100 грн');
   if (!token || token.length < 8) return showErr('Невірний токен Monobank API');
-  if (!jarId)                  return showErr('Введи ID банки');
+  if (!jarId)                     return showErr('Введи посилання на банку');
 
   const btn = document.getElementById('btn-create');
   btn.disabled = true; btn.textContent = '⏳ Створення...';
 
   try {
     await API.createContest({
-      title, prize,
+      title, prize, venue,
       target_amount: Math.round(target * 100),
       min_donation:  Math.round(minDon  * 100),
       mono_token: token,
@@ -770,9 +982,56 @@ async function doCreate() {
     tg?.showAlert('✅ Розіграш успішно створено!');
     await nav('organizer');
   } catch (e) {
-    showErr(e.message || 'Помилка. Перевір токен і ID банки.');
+    showErr(e.message || 'Помилка. Перевір токен і посилання на банку.');
     btn.disabled = false; btn.textContent = '🎁 Створити розіграш';
   }
+}
+
+async function fetchJarInfo() {
+  const token  = document.getElementById('f-token')?.value?.trim();
+  const jarUrl = document.getElementById('f-jarurl')?.value?.trim();
+  const errEl  = document.getElementById('jar-err');
+  const btn    = document.getElementById('btn-fetch-jar');
+
+  errEl.style.display = 'none';
+  if (!token || !jarUrl) {
+    errEl.textContent = 'Спочатку введи токен і посилання на банку';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  btn.disabled = true; btn.textContent = '⏳ Завантаження...';
+  try {
+    const info = await API.getJarInfo(token, jarUrl);
+    if (!info.ok) throw new Error(info.error);
+
+    if (info.title) document.getElementById('f-title').value = info.title;
+    if (info.goal)  document.getElementById('f-target').value = Math.round(info.goal / 100);
+    document.getElementById('f-jarid-hidden').value = info.send_id || '';
+
+    const preview = document.getElementById('jar-preview');
+    preview.querySelector('div').innerHTML = `
+      <div style="font-weight:600;margin-bottom:4px">🫙 ${esc(info.title)}</div>
+      ${info.description ? `<div style="opacity:.6;margin-bottom:4px">${esc(info.description)}</div>` : ''}
+      <div style="font-size:12px;opacity:.5">Ціль: ${uah(info.goal)} &nbsp;·&nbsp; Зараз: ${uah(info.balance)}</div>`;
+    preview.style.display = 'block';
+  } catch(e) {
+    errEl.textContent = e.message || 'Помилка отримання даних';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false; btn.textContent = '🔍 Отримати дані банки';
+  }
+}
+
+function homeFilter(val) {
+  S.homeSearch = val;
+  S.homePage = 1;
+  mount();
+}
+
+function homeSetPage(p) {
+  S.homePage = p;
+  mount();
 }
 
 // ════════════════════════════════════════════════
@@ -796,15 +1055,10 @@ async function boot() {
     return;
   }
 
-  // Default: активний конкурс
-  try {
-    const d = await API.getActive();
-    S.contest      = d.contest      ?? null;
-    S.transactions = d.transactions ?? [];
-  } catch { S.contest = null; S.transactions = []; }
-  S.view = 'participant';
+  // Default: список всіх розіграшів
+  try { S.allContests = (await API.getAllContests()) || []; } catch { S.allContests = []; }
+  S.view = 'home';
   mount();
-  if (S.contest?.status === 'active') startPoll(S.contest.id);
 }
 
 boot();
