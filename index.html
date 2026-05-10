@@ -1003,7 +1003,7 @@ async function fetchJarInfo() {
   btn.disabled = true; btn.textContent = '⏳ Завантаження...';
   try {
     const info = await API.getJarInfo(token, jarUrl);
-    if (!info.ok) throw new Error(info.error);
+    if (info.error || !info.title) throw new Error(info.error || 'Помилка отримання даних');
 
     if (info.title) document.getElementById('f-title').value = info.title;
     if (info.goal)  document.getElementById('f-target').value = Math.round(info.goal / 100);
